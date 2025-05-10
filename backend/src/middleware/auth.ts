@@ -3,6 +3,10 @@ import jwt from 'jsonwebtoken';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-key';
 
+export const generateToken = (userId: string) => {
+  return jwt.sign({ id: userId }, JWT_SECRET, { expiresIn: '24h' });
+};
+
 export const auth = (req: Request, res: Response, next: NextFunction) => {
   const token = req.header('Authorization')?.replace('Bearer ', '');
   if (!token) return res.status(401).json({ error: 'Token gerekli' });

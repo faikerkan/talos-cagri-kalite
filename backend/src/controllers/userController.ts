@@ -277,82 +277,62 @@ export const deleteUser = async (req: Request, res: Response) => {
 
 export const getProfile = async (req: Request, res: Response) => {
   try {
-    // Auth middleware'inden gelen kullanıcı bilgisi
-    const userId = req.user?._id;
+    const userId = req.user?.id;
     
     if (!userId) {
-      return res.status(401).json({ error: 'Yetkilendirme hatası' });
+      return res.status(401).json({ error: 'Kullanıcı bilgisi bulunamadı.' });
     }
-
-    // Önbellekten kullanıcı bilgilerini kontrol et
-    const cacheKey = CACHE_KEYS.USER_BY_ID(userId.toString());
-    const cachedUser = cache.get<any>(cacheKey);
     
-    if (cachedUser) {
-      customLogger.debug(`Cache hit for user profile: ${userId}`);
-      return res.status(200).json(cachedUser);
-    }
-
-    // Önbellekte yoksa veritabanından al
     const user = await User.findById(userId).select('-password');
-
+    
     if (!user) {
       return res.status(404).json({ error: 'Kullanıcı bulunamadı.' });
     }
-
-    // Sonucu önbelleğe ekle
-    const userData = {
+    
+    res.status(200).json({
       id: user._id,
       username: user.username,
       full_name: user.full_name,
       email: user.email,
       role: user.role,
-    };
-    
-    cache.set(cacheKey, userData, CACHE_TTL.DETAIL);
-
-    res.status(200).json(userData);
+    });
   } catch (error) {
-    customLogger.error('Profil bilgisi getirme hatası:', error);
+    console.error('Profil bilgisi getirme hatası:', error);
     res.status(500).json({ error: 'Sunucu hatası' });
   }
 };
 
 export const changePassword = async (req: Request, res: Response) => {
   try {
-    const userId = req.user?._id;
+    const userId = req.user?.id;
     const { currentPassword, newPassword } = req.body;
     
     if (!userId) {
-      return res.status(401).json({ error: 'Yetkilendirme hatası' });
+      return res.status(401).json({ error: 'Kullanıcı bilgisi bulunamadı.' });
     }
-
+    
     if (!currentPassword || !newPassword) {
       return res.status(400).json({ error: 'Mevcut şifre ve yeni şifre gereklidir.' });
     }
-
-    // Kullanıcıyı bul
+    
     const user = await User.findById(userId);
-
+    
     if (!user) {
       return res.status(404).json({ error: 'Kullanıcı bulunamadı.' });
     }
-
+    
     // Mevcut şifreyi kontrol et
-    const isPasswordValid = await user.comparePassword(currentPassword);
-    if (!isPasswordValid) {
+    if (!(await user.comparePassword(currentPassword))) {
       return res.status(400).json({ error: 'Mevcut şifre yanlış.' });
     }
-
+    
     // Yeni şifreyi ayarla
     user.password = newPassword;
     await user.save();
-
-    customLogger.info(`Kullanıcı şifresi değiştirildi: ${user.username}`);
-
-    res.status(200).json({ message: 'Şifre başarıyla değiştirildi' });
+    
+    res.status(200).json({ message: 'Şifre başarıyla değiştirildi.' });
   } catch (error) {
-    customLogger.error('Şifre değiştirme hatası:', error);
+    console.error('Şifre değiştirme hatası:', error);
     res.status(500).json({ error: 'Sunucu hatası' });
   }
 };

@@ -1,11 +1,12 @@
-import pool from './database';
+import { pool } from './database';
 import fs from 'fs';
 import path from 'path';
 
 async function initializeDatabase() {
+  let client;
   try {
     // Veritabanı bağlantısını test et
-    const client = await pool.connect();
+    client = await pool.connect();
     console.log('Veritabanı bağlantısı başarılı!');
 
     // SQL şemasını oku ve çalıştır
@@ -15,10 +16,13 @@ async function initializeDatabase() {
     await client.query(schema);
     console.log('Veritabanı şeması başarıyla oluşturuldu!');
 
-    client.release();
   } catch (error) {
     console.error('Veritabanı başlatma hatası:', error);
     process.exit(1);
+  } finally {
+    if (client) {
+      client.release();
+    }
   }
 }
 
