@@ -1,0 +1,27 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+---
+description: "Çağrı Merkezi Kalite Programı için özel kurallar"
+globs: ["**/*.js", "**/*.jsx", "**/*.tsx", "**/*.json"]
+alwaysApply: true
+---
+
+- Proje için kullandığın teknoloji stack'i: React (Frontend), Node.js (Backend), PostgreSQL (DB), Express.js (Backend Framework).
+- Kodlamada kullanıcı dostu, sade ve temiz bir stil kullan.
+- Dosya isimleri PascalCase veya kebab-case biçiminde olacak.
+- React component'lerini Functional Component olarak yaz, Hooks kullan.
+- Backend API’lerinde RESTful prensiplerini izle.
+- Form validasyonları frontend ve backend’de ayrı ayrı yapılmalı.
+- Kullanıcı kimlik doğrulama ve yetkilendirme için JWT kullan.
+- MP3 dosya yüklemeleri için API endpoint’leri oluştur ve yükleme sırasında dosya tipi kontrolü yap.
+- Tüm formlar ve dashboardlar responsive (mobil ve tablet uyumlu) olacak şekilde geliştirilmeli.
+- Veri modellerini oluştururken ilişkisel veritabanı (PostgreSQL) standartlarına uygun yapılandır.
+- Error handling ve Logging için middleware’ler oluştur.
+- Backend üzerinde endpoint ve controller mantığı net olarak ayrıştırılmış olsun.
+- Değerlendirme formunu ayrı bir React bileşeni olarak modüler geliştir.
+- Dashboard ekranları ayrı route'larda modüler olarak geliştirilmeli.
+- Gelecekteki CRM, LLM ve AI entegrasyonları için yorum satırları ile alanlar bırak.
+- Kodda Türkçe karakter ve yorumlar kullanabilirsin ancak fonksiyon ve değişken isimleri İngilizce olacak.
