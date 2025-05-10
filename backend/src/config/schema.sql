@@ -52,6 +52,7 @@ CREATE TABLE evaluation_details (
     criteria_id INTEGER REFERENCES evaluation_criteria(id),
     score DECIMAL(5,2),
     notes TEXT,
+    penalty_type VARCHAR(10) DEFAULT 'none',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );

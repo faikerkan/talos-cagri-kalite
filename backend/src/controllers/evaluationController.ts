@@ -1,7 +1,8 @@
 import { Request, Response } from 'express';
 import { EvaluationModel, Evaluation, EvaluationDetail } from '../models/Evaluation';
 import { CallModel } from '../models/Call';
-import pool from '../config/database';
+import { pool } from '../config/database';
+import ExcelJS from 'exceljs';
 
 // Yeni değerlendirme oluşturma
 export const createEvaluation = async (req: Request, res: Response) => {
@@ -29,12 +30,21 @@ export const createEvaluation = async (req: Request, res: Response) => {
     };
     
     // Detay nesnelerini hazırla
-    const evaluationDetails: EvaluationDetail[] = details.map((detail: any) => ({
-      evaluation_id: 0, // Bu değer createEvaluation'da otomatik atanacak
-      criteria_id: detail.criteria_id,
-      score: detail.score,
-      notes: detail.notes || ''
-    }));
+    const evaluationDetails: EvaluationDetail[] = details.map((detail: any) => {
+      let score = detail.score;
+      if (detail.penalty_type === 'half') {
+        score = score / 2;
+      } else if (detail.penalty_type === 'zero') {
+        score = 0;
+      }
+      return {
+        evaluation_id: 0, // Bu değer createEvaluation'da otomatik atanacak
+        criteria_id: detail.criteria_id,
+        score,
+        notes: detail.notes || '',
+        penalty_type: detail.penalty_type || 'none'
+      };
+    });
     
     // Veritabanına kaydet
     const result = await EvaluationModel.create(evaluation, evaluationDetails);
@@ -231,13 +241,15 @@ export const getEvaluationStats = async (req: Request, res: Response) => {
     
     const agentStatsResult = await pool.query(agentStatsQuery, params);
     
-    // Kriterlere göre ortalama puanlar
+    // Kriterlere göre ortalama puanlar ve penalty istatistikleri
     const criteriaStatsQuery = `
       SELECT 
         ec.id as criteria_id,
         ec.name as criteria_name,
         AVG(ed.score) as average_score,
-        (AVG(ed.score) / ec.max_score * 100) as percentage
+        (AVG(ed.score) / ec.max_score * 100) as percentage,
+        COUNT(*) FILTER (WHERE ed.penalty_type != 'none') as penalty_count,
+        (COUNT(*) FILTER (WHERE ed.penalty_type != 'none')::float / COUNT(*)) as penalty_ratio
       FROM evaluation_details ed
       JOIN evaluations e ON ed.evaluation_id = e.id
       JOIN evaluation_criteria ec ON ed.criteria_id = ec.id
@@ -245,11 +257,22 @@ export const getEvaluationStats = async (req: Request, res: Response) => {
       GROUP BY ec.id, ec.name, ec.max_score
       ORDER BY criteria_id
     `;
-    
     const criteriaStatsResult = await pool.query(criteriaStatsQuery, params);
-    
+
+    // Genel penalty istatistikleri
+    const penaltyCount = criteriaStatsResult.rows.reduce((acc, c) => acc + Number(c.penalty_count), 0);
+    const penaltyRatio = criteriaStatsResult.rows.length > 0 ?
+      (criteriaStatsResult.rows.reduce((acc, c) => acc + Number(c.penalty_count), 0) /
+      criteriaStatsResult.rows.reduce((acc, c) => acc + Number(c.penalty_count) / (Number(c.penalty_ratio) || 1), 0)) : 0;
+
     res.json({
-      general: generalStatsResult.rows[0] || { total_evaluations: 0, average_score: 0 },
+      general: {
+        ...generalStatsResult.rows[0],
+        penalty_count: penaltyCount,
+        penalty_ratio: criteriaStatsResult.rows.length > 0 ?
+          (criteriaStatsResult.rows.reduce((acc, c) => acc + Number(c.penalty_count), 0) /
+          criteriaStatsResult.rows.reduce((acc, c) => acc + Number(c.penalty_count) / (Number(c.penalty_ratio) || 1), 0)) : 0
+      },
       agents: agentStatsResult.rows || [],
       criteria: criteriaStatsResult.rows || []
     });
@@ -257,4 +280,18 @@ export const getEvaluationStats = async (req: Request, res: Response) => {
     console.error('İstatistik getirme hatası:', error);
     res.status(500).json({ error: 'Sunucu hatası' });
   }
+};
+
+// Penalty istatistiklerini Excel olarak export eden endpoint
+export const exportEvaluationStats = async (req: Request, res: Response) => {
+  try {
+    // Aynı filtreleri kullan
+    const startDate = req.query.startDate as string || '';
+    const endDate = req.query.endDate as string || '';
+    let dateFilter = '';
+    const params: any[] = [];
+    if (startDate && endDate) {
+      dateFilter = 'WHERE e.evaluation_date BETWEEN $1 AND $2';
+      params.push(startDate, endDate);
+    } else if (startDate) {
 }; 

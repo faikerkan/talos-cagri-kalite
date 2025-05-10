@@ -6,7 +6,8 @@ import {
   getEvaluationsByEvaluator,
   getEvaluationsByAgent,
   getEvaluationDetail,
-  getEvaluationStats
+  getEvaluationStats,
+  exportEvaluationStats
 } from '../controllers/evaluationController';
 import { authenticateToken } from '../middleware/authMiddleware';
 import { checkRole } from '../middleware/roleMiddleware';
@@ -33,5 +34,8 @@ router.get('/:id', authenticateToken, getEvaluationDetail);
 
 // İstatistikleri getirme
 router.get('/stats/summary', authenticateToken, checkRole(['quality_expert', 'manager']), getEvaluationStats);
+
+// Excel export
+router.get('/stats/export', authenticateToken, checkRole(['quality_expert', 'manager']), exportEvaluationStats);
 
 export default router; 

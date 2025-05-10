@@ -1,4 +1,4 @@
-import pool from '../config/database';
+import { pool } from '../config/database';
 
 export interface Evaluation {
   id?: number;
@@ -17,6 +17,7 @@ export interface EvaluationDetail {
   criteria_id: number;
   score: number;
   notes?: string;
+  penalty_type?: 'none' | 'half' | 'zero';
   created_at?: Date;
   updated_at?: Date;
 }
@@ -45,14 +46,15 @@ export class EvaluationModel {
       // Değerlendirme detaylarını ekle
       for (const detail of details) {
         const detailQuery = `
-          INSERT INTO evaluation_details (evaluation_id, criteria_id, score, notes)
-          VALUES ($1, $2, $3, $4)
+          INSERT INTO evaluation_details (evaluation_id, criteria_id, score, notes, penalty_type)
+          VALUES ($1, $2, $3, $4, $5)
         `;
         const detailValues = [
           newEvaluation.id,
           detail.criteria_id,
           detail.score,
-          detail.notes
+          detail.notes,
+          detail.penalty_type || 'none'
         ];
         await client.query(detailQuery, detailValues);
       }

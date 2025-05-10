@@ -1,43 +1,23 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import { User } from '../models/User';
 
-interface AuthRequest extends Request {
-  user?: any;
-}
+const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-key';
 
-export const auth = async (req: AuthRequest, res: Response, next: NextFunction) => {
+export const auth = (req: Request, res: Response, next: NextFunction) => {
+  const token = req.header('Authorization')?.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'Token gerekli' });
   try {
-    const token = req.header('Authorization')?.replace('Bearer ', '');
-
-    if (!token) {
-      throw new Error();
-    }
-
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
-    const user = await User.findOne({ _id: (decoded as any)._id });
-
-    if (!user) {
-      throw new Error();
-    }
-
-    req.user = user;
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    req.user = decoded;
     next();
-  } catch (error) {
-    res.status(401).json({ error: 'Lütfen giriş yapın.' });
+  } catch {
+    return res.status(401).json({ error: 'Geçersiz token' });
   }
 };
 
-export const checkRole = (roles: string[]) => {
-  return (req: AuthRequest, res: Response, next: NextFunction) => {
-    if (!req.user) {
-      return res.status(401).json({ error: 'Lütfen giriş yapın.' });
-    }
-
-    if (!roles.includes(req.user.role)) {
-      return res.status(403).json({ error: 'Bu işlem için yetkiniz bulunmuyor.' });
-    }
-
-    next();
-  };
-}; 
+export const checkRole = (roles: string[]) => (req: Request, res: Response, next: NextFunction) => {
+  if (!req.user || !roles.includes(req.user.role)) {
+    return res.status(403).json({ error: 'Yetkisiz' });
+  }
+  next();
+};

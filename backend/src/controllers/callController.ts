@@ -2,6 +2,11 @@ import { Request, Response } from 'express';
 import { Call } from '../models/Call';
 import mongoose from 'mongoose';
 
+// Multer ile dosya yükleme için Request tipini genişlet
+interface MulterRequest extends Request {
+  file?: any;
+}
+
 export const createCall = async (req: Request, res: Response) => {
   try {
     const { customer_number, duration, date, status } = req.body;
@@ -114,5 +119,29 @@ export const deleteCall = async (req: Request, res: Response) => {
     res.json({ message: 'Çağrı silindi.' });
   } catch (error) {
     res.status(500).json({ error: 'Çağrı silinemedi.' });
+  }
+};
+
+// MP3 dosya yükleme
+export const uploadRecording = async (req: MulterRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Geçersiz çağrı ID.' });
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: 'Dosya yüklenmedi.' });
+    }
+    const call = await Call.findByIdAndUpdate(
+      id,
+      { recording_path: req.file.path },
+      { new: true }
+    );
+    if (!call) {
+      return res.status(404).json({ error: 'Çağrı bulunamadı.' });
+    }
+    res.json({ message: 'Kayıt başarıyla yüklendi.', call });
+  } catch (error) {
+    res.status(500).json({ error: 'Kayıt yüklenirken bir hata oluştu.' });
   }
 }; 

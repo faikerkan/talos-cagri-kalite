@@ -9,6 +9,7 @@ export interface ICall extends Document {
   status: 'pending' | 'evaluated' | 'archived';
   type: 'inbound' | 'outbound' | 'transfer';
   notes?: string;
+  recording_path: string;
 }
 
 const callSchema = new Schema<ICall>(
@@ -21,6 +22,7 @@ const callSchema = new Schema<ICall>(
     status: { type: String, enum: ['pending', 'evaluated', 'archived'], default: 'pending' },
     type: { type: String, enum: ['inbound', 'outbound', 'transfer'], default: 'inbound' },
     notes: { type: String },
+    recording_path: { type: String },
   },
   { timestamps: true }
 );

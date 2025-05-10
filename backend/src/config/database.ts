@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { Pool } from 'pg';
 
 const connectDB = async () => {
   try {
@@ -10,4 +11,14 @@ const connectDB = async () => {
   }
 };
 
-export default connectDB; 
+// PostgreSQL Pool
+const pool = new Pool({
+  user: process.env.PGUSER || 'postgres',
+  host: process.env.PGHOST || 'localhost',
+  database: process.env.PGDATABASE || 'call_center_qa',
+  password: process.env.PGPASSWORD || 'postgres',
+  port: parseInt(process.env.PGPORT || '5432', 10),
+});
+
+export default connectDB;
+export { pool }; 

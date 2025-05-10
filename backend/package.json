@@ -32,7 +32,9 @@
     "mongoose": "^7.0.3",
     "pg": "^8.11.3",
     "ts-node": "^10.9.1",
-    "typescript": "^5.0.3"
+    "typescript": "^5.0.3",
+    "multer": "^1.4.5-lts.1",
+    "exceljs": "^4.3.0"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.2",
