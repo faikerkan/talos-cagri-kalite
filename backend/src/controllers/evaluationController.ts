@@ -1,8 +1,10 @@
 import { Request, Response } from 'express';
 import { EvaluationModel, Evaluation, EvaluationDetail } from '../models/Evaluation';
-import { CallModel } from '../models/Call';
+import { Call } from '../models/Call';
 import { pool } from '../config/database';
 import ExcelJS from 'exceljs';
+import { AIService } from '../services/aiService';
+import { NotificationService } from '../services/notificationService';
 
 // Yeni değerlendirme oluşturma
 export const createEvaluation = async (req: Request, res: Response) => {
@@ -51,6 +53,11 @@ export const createEvaluation = async (req: Request, res: Response) => {
     
     // Çağrı durumunu güncelle
     await pool.query('UPDATE calls SET status = $1 WHERE id = $2', ['evaluated', call_id]);
+    
+    // Düşük puan bildirimi kontrolü
+    if (result.id) {
+      await NotificationService.checkLowScore(result.id);
+    }
     
     res.status(201).json(result);
   } catch (error) {
@@ -196,10 +203,155 @@ export const getEvaluationStats = async (req: Request, res: Response) => {
     // Tarih aralığı filtreleri
     const startDate = req.query.startDate as string || '';
     const endDate = req.query.endDate as string || '';
+    const agentId = req.query.agentId as string || '';
+    const evaluatorId = req.query.evaluatorId as string || '';
+    const minScore = req.query.minScore as string || '';
+    const maxScore = req.query.maxScore as string || '';
     
+    let whereConditions = [];
+    const params: any[] = [];
+    let paramIndex = 1;
+    
+    // Filtre koşullarını oluştur
+    if (startDate) {
+      whereConditions.push(`e.evaluation_date >= $${paramIndex}`);
+      params.push(startDate);
+      paramIndex++;
+    }
+    
+    if (endDate) {
+      whereConditions.push(`e.evaluation_date <= $${paramIndex}`);
+      params.push(endDate);
+      paramIndex++;
+    }
+    
+    if (agentId) {
+      whereConditions.push(`c.agent_id = $${paramIndex}`);
+      params.push(agentId);
+      paramIndex++;
+    }
+    
+    if (evaluatorId) {
+      whereConditions.push(`e.evaluator_id = $${paramIndex}`);
+      params.push(evaluatorId);
+      paramIndex++;
+    }
+    
+    if (minScore) {
+      whereConditions.push(`e.total_score >= $${paramIndex}`);
+      params.push(minScore);
+      paramIndex++;
+    }
+    
+    if (maxScore) {
+      whereConditions.push(`e.total_score <= $${paramIndex}`);
+      params.push(maxScore);
+      paramIndex++;
+    }
+    
+    const whereClause = whereConditions.length 
+      ? `WHERE ${whereConditions.join(' AND ')}`
+      : '';
+    
+    // Genel istatistikler
+    const generalStatsQuery = `
+      SELECT 
+        COUNT(*) as total_evaluations,
+        AVG(total_score) as average_score,
+        MAX(total_score) as highest_score,
+        MIN(total_score) as lowest_score
+      FROM evaluations e
+      JOIN calls c ON e.call_id = c.id
+      ${whereClause}
+    `;
+    
+    const generalStatsResult = await pool.query(generalStatsQuery, params);
+    
+    // Temsilcilere göre ortalama puanlar
+    const agentStatsQuery = `
+      SELECT 
+        a.id as agent_id,
+        a.full_name as agent_name,
+        COUNT(e.id) as evaluation_count,
+        AVG(e.total_score) as average_score
+      FROM evaluations e
+      JOIN calls c ON e.call_id = c.id
+      JOIN users a ON c.agent_id = a.id
+      ${whereClause}
+      GROUP BY a.id, a.full_name
+      ORDER BY average_score DESC
+    `;
+    
+    const agentStatsResult = await pool.query(agentStatsQuery, params);
+    
+    // Kriterlere göre ortalama puanlar ve penalty istatistikleri
+    const criteriaStatsQuery = `
+      SELECT 
+        ec.id as criteria_id,
+        ec.name as criteria_name,
+        AVG(ed.score) as average_score,
+        (AVG(ed.score) / ec.max_score * 100) as percentage,
+        COUNT(*) FILTER (WHERE ed.penalty_type != 'none') as penalty_count,
+        (COUNT(*) FILTER (WHERE ed.penalty_type != 'none')::float / COUNT(*)) as penalty_ratio
+      FROM evaluation_details ed
+      JOIN evaluations e ON ed.evaluation_id = e.id
+      JOIN evaluation_criteria ec ON ed.criteria_id = ec.id
+      JOIN calls c ON e.call_id = c.id
+      ${whereClause}
+      GROUP BY ec.id, ec.name, ec.max_score
+      ORDER BY criteria_id
+    `;
+    const criteriaStatsResult = await pool.query(criteriaStatsQuery, params);
+
+    // Değerlendirme listesi (ilk 100)
+    const evaluationsQuery = `
+      SELECT 
+        e.id,
+        e.evaluation_date as date,
+        a.full_name as agent_name,
+        c.id as call_ref,
+        ev.full_name as evaluator_name,
+        e.total_score as score
+      FROM evaluations e
+      JOIN calls c ON e.call_id = c.id
+      JOIN users a ON c.agent_id = a.id
+      JOIN users ev ON e.evaluator_id = ev.id
+      ${whereClause}
+      ORDER BY e.evaluation_date DESC
+      LIMIT 100
+    `;
+    const evaluationsResult = await pool.query(evaluationsQuery, params);
+
+    // Genel penalty istatistikleri
+    const penaltyCount = criteriaStatsResult.rows.reduce((acc, c) => acc + Number(c.penalty_count), 0);
+    const penaltyRatio = criteriaStatsResult.rows.length > 0 ?
+      (criteriaStatsResult.rows.reduce((acc, c) => acc + Number(c.penalty_count), 0) /
+      criteriaStatsResult.rows.reduce((acc, c) => acc + Number(c.penalty_count) / (Number(c.penalty_ratio) || 1), 0)) : 0;
+
+    res.json({
+      general: {
+        ...generalStatsResult.rows[0],
+        penalty_count: penaltyCount,
+        penalty_ratio: penaltyRatio
+      },
+      agents: agentStatsResult.rows || [],
+      criteria: criteriaStatsResult.rows || [],
+      evaluations: evaluationsResult.rows || []
+    });
+  } catch (error) {
+    console.error('İstatistik getirme hatası:', error);
+    res.status(500).json({ error: 'Sunucu hatası' });
+  }
+};
+
+// Penalty istatistiklerini Excel olarak export eden endpoint
+export const exportEvaluationStats = async (req: Request, res: Response) => {
+  try {
+    // Aynı filtreleri kullan
+    const startDate = req.query.startDate as string || '';
+    const endDate = req.query.endDate as string || '';
     let dateFilter = '';
     const params: any[] = [];
-    
     if (startDate && endDate) {
       dateFilter = 'WHERE e.evaluation_date BETWEEN $1 AND $2';
       params.push(startDate, endDate);
@@ -219,6 +371,7 @@ export const getEvaluationStats = async (req: Request, res: Response) => {
         MAX(total_score) as highest_score,
         MIN(total_score) as lowest_score
       FROM evaluations e
+      JOIN calls c ON e.call_id = c.id
       ${dateFilter}
     `;
     
@@ -253,11 +406,31 @@ export const getEvaluationStats = async (req: Request, res: Response) => {
       FROM evaluation_details ed
       JOIN evaluations e ON ed.evaluation_id = e.id
       JOIN evaluation_criteria ec ON ed.criteria_id = ec.id
+      JOIN calls c ON e.call_id = c.id
       ${dateFilter}
       GROUP BY ec.id, ec.name, ec.max_score
       ORDER BY criteria_id
     `;
     const criteriaStatsResult = await pool.query(criteriaStatsQuery, params);
+
+    // Değerlendirme listesi (ilk 100)
+    const evaluationsQuery = `
+      SELECT 
+        e.id,
+        e.evaluation_date as date,
+        a.full_name as agent_name,
+        c.id as call_ref,
+        ev.full_name as evaluator_name,
+        e.total_score as score
+      FROM evaluations e
+      JOIN calls c ON e.call_id = c.id
+      JOIN users a ON c.agent_id = a.id
+      JOIN users ev ON e.evaluator_id = ev.id
+      ${dateFilter}
+      ORDER BY e.evaluation_date DESC
+      LIMIT 100
+    `;
+    const evaluationsResult = await pool.query(evaluationsQuery, params);
 
     // Genel penalty istatistikleri
     const penaltyCount = criteriaStatsResult.rows.reduce((acc, c) => acc + Number(c.penalty_count), 0);
@@ -269,12 +442,11 @@ export const getEvaluationStats = async (req: Request, res: Response) => {
       general: {
         ...generalStatsResult.rows[0],
         penalty_count: penaltyCount,
-        penalty_ratio: criteriaStatsResult.rows.length > 0 ?
-          (criteriaStatsResult.rows.reduce((acc, c) => acc + Number(c.penalty_count), 0) /
-          criteriaStatsResult.rows.reduce((acc, c) => acc + Number(c.penalty_count) / (Number(c.penalty_ratio) || 1), 0)) : 0
+        penalty_ratio: penaltyRatio
       },
       agents: agentStatsResult.rows || [],
-      criteria: criteriaStatsResult.rows || []
+      criteria: criteriaStatsResult.rows || [],
+      evaluations: evaluationsResult.rows || []
     });
   } catch (error) {
     console.error('İstatistik getirme hatası:', error);
@@ -282,16 +454,140 @@ export const getEvaluationStats = async (req: Request, res: Response) => {
   }
 };
 
-// Penalty istatistiklerini Excel olarak export eden endpoint
-export const exportEvaluationStats = async (req: Request, res: Response) => {
+// Trend verilerini getirme
+export const getTrendData = async (req: Request, res: Response) => {
   try {
-    // Aynı filtreleri kullan
-    const startDate = req.query.startDate as string || '';
-    const endDate = req.query.endDate as string || '';
-    let dateFilter = '';
-    const params: any[] = [];
-    if (startDate && endDate) {
-      dateFilter = 'WHERE e.evaluation_date BETWEEN $1 AND $2';
-      params.push(startDate, endDate);
-    } else if (startDate) {
+    const timeRange = req.query.timeRange as string || 'month';
+    
+    let intervalUnit = 'day';
+    let intervalCount = 30; // Varsayılan aylık
+    
+    // Zaman aralığına göre uygun parametreleri belirle
+    switch (timeRange) {
+      case 'week':
+        intervalUnit = 'day';
+        intervalCount = 7;
+        break;
+      case 'month':
+        intervalUnit = 'day';
+        intervalCount = 30;
+        break;
+      case 'quarter':
+        intervalUnit = 'week';
+        intervalCount = 12;
+        break;
+      case 'year':
+        intervalUnit = 'month';
+        intervalCount = 12;
+        break;
+      default:
+        intervalUnit = 'day';
+        intervalCount = 30;
+    }
+    
+    // Zaman dilimlerine göre verileri getir (PostgreSQL'in date_trunc fonksiyonu ile)
+    const query = `
+      WITH date_series AS (
+        SELECT 
+          date_trunc($1, evaluation_date) as time_bucket
+        FROM 
+          evaluations
+        WHERE 
+          evaluation_date >= NOW() - ($2 || ' ' || $1)::INTERVAL
+        GROUP BY 
+          date_trunc($1, evaluation_date)
+        ORDER BY 
+          time_bucket
+      )
+      SELECT 
+        to_char(ds.time_bucket, 'YYYY-MM-DD') as date,
+        COALESCE(AVG(e.total_score), 0) as average_score,
+        COALESCE(
+          COUNT(*) FILTER (WHERE ed.penalty_type != 'none')::float / NULLIF(COUNT(*), 0), 
+          0
+        ) as penalty_ratio
+      FROM 
+        date_series ds
+      LEFT JOIN 
+        evaluations e ON date_trunc($1, e.evaluation_date) = ds.time_bucket
+      LEFT JOIN 
+        evaluation_details ed ON ed.evaluation_id = e.id
+      GROUP BY 
+        ds.time_bucket
+      ORDER BY 
+        ds.time_bucket
+    `;
+    
+    const result = await pool.query(query, [intervalUnit, intervalCount.toString()]);
+    
+    // Verileri uygun formata dönüştürüp gönder
+    const trendData = result.rows.map(row => ({
+      date: row.date,
+      averageScore: parseFloat(row.average_score || 0),
+      penaltyRatio: parseFloat(row.penalty_ratio || 0)
+    }));
+    
+    res.json(trendData);
+  } catch (error) {
+    console.error('Trend verisi getirme hatası:', error);
+    res.status(500).json({ error: 'Sunucu hatası' });
+  }
+};
+
+// AI ile otomatik değerlendirme oluşturma
+export const createAutoEvaluation = async (req: Request, res: Response) => {
+  try {
+    const { callId } = req.params;
+    
+    if (!callId) {
+      return res.status(400).json({ error: 'Çağrı ID parametresi gereklidir' });
+    }
+    
+    // Değerlendirmeyi yapan kullanıcının ID'sini alıyoruz
+    const evaluatorId = req.user?.id;
+    
+    if (!evaluatorId) {
+      return res.status(401).json({ error: 'Kullanıcı bilgisi bulunamadı' });
+    }
+    
+    // Çağrı detaylarını getir
+    const callQuery = 'SELECT * FROM calls WHERE id = $1';
+    const callResult = await pool.query(callQuery, [callId]);
+    
+    if (callResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Çağrı bulunamadı' });
+    }
+    
+    const call = callResult.rows[0];
+    
+    if (!call.recording_path) {
+      return res.status(400).json({ error: 'Bu çağrı için kayıt bulunamadı' });
+    }
+    
+    // Zaten değerlendirilmiş mi kontrol et
+    const existingEvaluation = await EvaluationModel.findByCallId(parseInt(callId));
+    if (existingEvaluation) {
+      return res.status(400).json({ error: 'Bu çağrı zaten değerlendirilmiş' });
+    }
+    
+    // AI servisi ile değerlendirme yap
+    const evaluation = await AIService.processCallWithAI(
+      parseInt(callId),
+      call.recording_path,
+      parseInt(evaluatorId)
+    );
+    
+    // Düşük puan bildirimi kontrolü
+    if (evaluation.id) {
+      await NotificationService.checkLowScore(evaluation.id);
+    }
+    
+    res.status(201).json({
+      message: 'Otomatik değerlendirme başarıyla oluşturuldu',
+      evaluation
+    });
+  } catch (error) {
+    console.error('Otomatik değerlendirme hatası:', error);
+    res.status(500).json({ error: 'Sunucu hatası' });
+  }
 }; 

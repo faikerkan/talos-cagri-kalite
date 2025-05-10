@@ -7,7 +7,9 @@ import {
   getEvaluationsByAgent,
   getEvaluationDetail,
   getEvaluationStats,
-  exportEvaluationStats
+  exportEvaluationStats,
+  getTrendData,
+  createAutoEvaluation
 } from '../controllers/evaluationController';
 import { authenticateToken } from '../middleware/authMiddleware';
 import { checkRole } from '../middleware/roleMiddleware';
@@ -16,6 +18,9 @@ const router = express.Router();
 
 // Değerlendirme oluşturma (Kalite uzmanları için)
 router.post('/', authenticateToken, checkRole(['quality_expert']), createEvaluation);
+
+// AI ile otomatik değerlendirme oluşturma
+router.post('/auto/:callId', authenticateToken, checkRole(['quality_expert', 'manager']), createAutoEvaluation);
 
 // Kendi değerlendirmelerini getirme (Rol bazlı)
 router.get('/my-evaluations', authenticateToken, getMyEvaluations);
@@ -34,6 +39,9 @@ router.get('/:id', authenticateToken, getEvaluationDetail);
 
 // İstatistikleri getirme
 router.get('/stats/summary', authenticateToken, checkRole(['quality_expert', 'manager']), getEvaluationStats);
+
+// Trend verilerini getirme
+router.get('/stats/trend', authenticateToken, checkRole(['quality_expert', 'manager']), getTrendData);
 
 // Excel export
 router.get('/stats/export', authenticateToken, checkRole(['quality_expert', 'manager']), exportEvaluationStats);
