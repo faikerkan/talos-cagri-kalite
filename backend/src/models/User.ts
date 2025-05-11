@@ -8,6 +8,7 @@ export interface IUser extends Document {
   email: string;
   role: 'agent' | 'quality_expert' | 'manager';
   status: 'active' | 'inactive';
+  tokenVersion: number;
   comparePassword(candidatePassword: string): Promise<boolean>;
 }
 
@@ -43,6 +44,10 @@ const userSchema = new Schema<IUser>(
       type: String,
       enum: ['active', 'inactive'],
       default: 'active',
+    },
+    tokenVersion: {
+      type: Number,
+      default: 0,
     },
   },
   {

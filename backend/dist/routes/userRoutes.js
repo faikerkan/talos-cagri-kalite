@@ -14,7 +14,7 @@ router.post('/login', userController_1.login);
 router.get('/profile', auth_1.auth, userController_1.getProfile);
 // Kullanıcı yönetimi (sadece manager)
 router.get('/', auth_1.auth, userController_1.listUsers);
-router.post('/', auth_1.auth, userController_1.addUser);
+router.post('/', auth_1.auth, userController_1.register);
 router.delete('/:id', auth_1.auth, userController_1.deleteUser);
 router.put('/:id', auth_1.auth, userController_1.updateUser);
 router.get('/agents', userController_1.listAgents);

@@ -1,49 +1,93 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import dotenv from 'dotenv';
+import { User } from '../models/User';
+import { ErrorResponse } from './errorHandler';
+import logger from '../utils/logger';
 
-dotenv.config();
-
-interface TokenPayload {
-  userId: string;
-  username: string;
-  role: string;
-}
-
-// JWT token'ı doğrulama middleware'i
-export const authenticateToken = (req: Request, res: Response, next: NextFunction) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) {
-    return res.status(401).json({ error: 'Erişim hatası: Token bulunamadı' });
-  }
-
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'default_secret') as any;
-    
-    // req objesine user bilgilerini ekle
-    req.user = {
-      id: decoded.userId || decoded.id,
-      username: decoded.username,
-      role: decoded.role
-    };
-    
-    next();
-  } catch (error) {
-    return res.status(403).json({ error: 'Erişim hatası: Geçersiz token' });
-  }
-};
-
-// Express Request interface'ini genişletelim
+// Request içinde user prop tanımla
 declare global {
   namespace Express {
     interface Request {
-      user?: {
-        id: string;
-        username: string;
-        role: string;
-      };
+      user?: any;
     }
   }
-} 
+}
+
+// JWT token'ı doğrulama ve kullanıcıyı req nesnesine ekleme
+export const protect = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    let token;
+
+    // Authorization header'dan Bearer token'ı al
+    if (
+      req.headers.authorization &&
+      req.headers.authorization.startsWith('Bearer')
+    ) {
+      token = req.headers.authorization.split(' ')[1];
+    } else if (req.cookies && req.cookies.token) {
+      // Cookie'den token al (alternatif)
+      token = req.cookies.token;
+    }
+
+    // Token yoksa hata fırlat
+    if (!token) {
+      return next(
+        new ErrorResponse('Bu kaynağa erişim için yetkilendirme gerekli', 401)
+      );
+    }
+
+    // Token'ı doğrula
+    const decoded = jwt.verify(token, process.env.JWT_SECRET as string) as any;
+
+    // Token'dan ID'yi alıp kullanıcıyı bul
+    const user = await User.findById(decoded.id);
+
+    if (!user) {
+      return next(
+        new ErrorResponse('Bu kimliğe sahip kullanıcı bulunamadı', 401)
+      );
+    }
+
+    // Kullanıcı inaktif ise erişimi engelle
+    if (user.status === 'inactive') {
+      return next(
+        new ErrorResponse('Hesabınız devre dışı bırakılmış, yönetici ile iletişime geçin', 403)
+      );
+    }
+
+    // Kullanıcıyı req objesine ekle
+    req.user = user;
+    next();
+  } catch (error) {
+    logger.error('Token doğrulama hatası:', error);
+    return next(
+      new ErrorResponse('Yetkilendirme başarısız, lütfen tekrar giriş yapın', 401)
+    );
+  }
+};
+
+// Belirli rollere erişimi kısıtlama
+export const authorize = (...roles: string[]) => {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (!req.user) {
+      return next(
+        new ErrorResponse('Yetkilendirme bilgileri bulunamadı', 401)
+      );
+    }
+
+    if (!roles.includes(req.user.role)) {
+      return next(
+        new ErrorResponse(
+          `${req.user.role} rolü bu işlemi gerçekleştirmek için yeterli yetkiye sahip değil`,
+          403
+        )
+      );
+    }
+
+    next();
+  };
+}; 

@@ -1,31 +1,33 @@
-import express from 'express';
-import cors from 'cors';
 import dotenv from 'dotenv';
+import app from './app';
 import connectDB from './config/database';
-import userRoutes from './routes/userRoutes';
-import callRoutes from './routes/callRoutes';
-import queueRoutes from './routes/queueRoutes';
-import evaluationRoutes from './routes/evaluationRoutes';
+import path from 'path';
+import fs from 'fs';
 
+// .env dosyasını yükle
 dotenv.config();
 
-const app = express();
-
-// Middleware
-app.use(cors());
-app.use(express.json());
-
-// Rotalar
-app.use('/api/users', userRoutes);
-app.use('/api/calls', callRoutes);
-app.use('/api/queues', queueRoutes);
-app.use('/api/evaluations', evaluationRoutes);
-
-// Veritabanı bağlantısı
+// Veritabanı bağlantısını yap
 connectDB();
 
-const PORT = process.env.PORT || 3001;
+// Uploads dizinini kontrol et ve yoksa oluştur
+const uploadsDir = path.join(__dirname, '..', 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+  console.log('Uploads dizini oluşturuldu');
+}
 
-app.listen(PORT, () => {
-  console.log(`Sunucu ${PORT} portunda çalışıyor`);
+// Sunucuyu başlat
+const PORT = process.env.PORT || 3001;
+const server = app.listen(PORT, () => {
+  console.log(`Sunucu ${PORT} portunda çalışıyor (${process.env.NODE_ENV} modu)`);
+});
+
+// Beklenmeyen kapanmalarda sunucuyu düzgün şekilde durdur
+process.on('unhandledRejection', (err: Error) => {
+  console.error(`Yakalanmamış Hata: ${err.message}`);
+  console.log('Sunucu kapatılıyor...');
+  server.close(() => {
+    process.exit(1);
+  });
 }); 

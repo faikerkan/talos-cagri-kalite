@@ -12,26 +12,41 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.pool = void 0;
 const mongoose_1 = __importDefault(require("mongoose"));
-const pg_1 = require("pg");
+// Mongoose bağlantı seçenekleri
+const mongooseOptions = {
+    autoIndex: true,
+    connectTimeoutMS: 10000, // 10 saniye
+    socketTimeoutMS: 45000, // 45 saniye
+    serverSelectionTimeoutMS: 30000, // 30 saniye
+    retryWrites: true,
+    retryReads: true,
+};
+// MongoDB'ye bağlanma fonksiyonu
 const connectDB = () => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const conn = yield mongoose_1.default.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/call-center-qa');
+        const mongoURI = process.env.MONGODB_URI || 'mongodb://localhost:27017/call-center-qa';
+        // Bağlantıyı oluştur
+        const conn = yield mongoose_1.default.connect(mongoURI, mongooseOptions);
         console.log(`MongoDB bağlantısı başarılı: ${conn.connection.host}`);
+        // Bağlantı hata yakalama
+        mongoose_1.default.connection.on('error', (err) => {
+            console.error(`MongoDB bağlantı hatası: ${err}`);
+        });
+        // Bağlantı koptuğunda
+        mongoose_1.default.connection.on('disconnected', () => {
+            console.warn('MongoDB bağlantısı koptu, yeniden bağlanmaya çalışılacak...');
+        });
+        // Bağlantı yeniden kurulduğunda
+        mongoose_1.default.connection.on('reconnected', () => {
+            console.info('MongoDB ile yeniden bağlantı kuruldu');
+        });
     }
     catch (error) {
         console.error('MongoDB bağlantı hatası:', error);
-        process.exit(1);
+        // 3 saniye sonra yeniden deneme
+        console.log('Yeniden bağlanmaya çalışılıyor...');
+        setTimeout(connectDB, 3000);
     }
 });
-// PostgreSQL Pool
-const pool = new pg_1.Pool({
-    user: process.env.PGUSER || 'postgres',
-    host: process.env.PGHOST || 'localhost',
-    database: process.env.PGDATABASE || 'call_center_qa',
-    password: process.env.PGPASSWORD || 'postgres',
-    port: parseInt(process.env.PGPORT || '5432', 10),
-});
-exports.pool = pool;
 exports.default = connectDB;

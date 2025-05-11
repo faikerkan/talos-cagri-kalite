@@ -3,9 +3,13 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.checkRole = exports.auth = void 0;
+exports.checkRole = exports.auth = exports.generateToken = void 0;
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-key';
+const generateToken = (userId, username, role) => {
+    return jsonwebtoken_1.default.sign({ id: userId, userId, username, role }, JWT_SECRET, { expiresIn: '24h' });
+};
+exports.generateToken = generateToken;
 const auth = (req, res, next) => {
     var _a;
     const token = (_a = req.header('Authorization')) === null || _a === void 0 ? void 0 : _a.replace('Bearer ', '');

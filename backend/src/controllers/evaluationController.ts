@@ -1,593 +1,399 @@
 import { Request, Response } from 'express';
-import { EvaluationModel, Evaluation, EvaluationDetail } from '../models/Evaluation';
+import { Evaluation } from '../models/Evaluation';
 import { Call } from '../models/Call';
-import { pool } from '../config/database';
+import { EvaluationCriteria } from '../models/EvaluationCriteria';
+import { User } from '../models/User';
+import mongoose from 'mongoose';
+import { ErrorResponse } from '../middleware/errorHandler';
+import { validateRequest } from '../middleware/errorHandler';
+import { evaluationValidationRules } from '../middleware/validator';
+import logger from '../utils/logger';
 import ExcelJS from 'exceljs';
-import { AIService } from '../services/aiService';
-import { NotificationService } from '../services/notificationService';
 
 // Yeni değerlendirme oluşturma
-export const createEvaluation = async (req: Request, res: Response) => {
+export const createEvaluation = async (req: Request, res: Response, next: Function) => {
   try {
-    const { call_id, total_score, notes, status, details } = req.body;
+    const { call, evaluator, total_score, notes, details } = req.body;
     
-    if (!call_id || !details || !Array.isArray(details)) {
-      return res.status(400).json({ error: 'Geçersiz veri formatı' });
+    // Çağrıyı kontrol et
+    const callExists = await Call.findById(call);
+    if (!callExists) {
+      return next(new ErrorResponse('Belirtilen çağrı bulunamadı', 404));
     }
     
-    // Değerlendirmeyi yapan kullanıcının ID'sini alıyoruz
-    const evaluatorId = req.user?.id;
-    
-    if (!evaluatorId) {
-      return res.status(401).json({ error: 'Kullanıcı bilgisi bulunamadı' });
+    // Değerlendirici kontrolü
+    if (evaluator !== req.user?.id && req.user?.role !== 'manager') {
+      return next(new ErrorResponse('Başka bir kullanıcı adına değerlendirme yapamazsınız', 403));
     }
     
-    // Değerlendirme nesnesini oluştur
-    const evaluation: Evaluation = {
-      call_id: parseInt(call_id),
-      evaluator_id: parseInt(evaluatorId),
+    // Çağrı zaten değerlendirilmiş mi?
+    const existingEvaluation = await Evaluation.findOne({ call });
+    if (existingEvaluation) {
+      return next(new ErrorResponse('Bu çağrı zaten değerlendirilmiş', 400));
+    }
+    
+    // Yeni değerlendirme oluştur
+    const evaluation = new Evaluation({
+      call,
+      evaluator,
       total_score,
       notes,
+      details,
       evaluation_date: new Date()
-    };
-    
-    // Detay nesnelerini hazırla
-    const evaluationDetails: EvaluationDetail[] = details.map((detail: any) => {
-      let score = detail.score;
-      if (detail.penalty_type === 'half') {
-        score = score / 2;
-      } else if (detail.penalty_type === 'zero') {
-        score = 0;
-      }
-      return {
-        evaluation_id: 0, // Bu değer createEvaluation'da otomatik atanacak
-        criteria_id: detail.criteria_id,
-        score,
-        notes: detail.notes || '',
-        penalty_type: detail.penalty_type || 'none'
-      };
     });
     
-    // Veritabanına kaydet
-    const result = await EvaluationModel.create(evaluation, evaluationDetails);
+    // Kaydet
+    await evaluation.save();
     
     // Çağrı durumunu güncelle
-    await pool.query('UPDATE calls SET status = $1 WHERE id = $2', ['evaluated', call_id]);
+    await Call.findByIdAndUpdate(call, { status: 'evaluated' });
     
     // Düşük puan bildirimi kontrolü
-    if (result.id) {
-      await NotificationService.checkLowScore(result.id);
+    if (total_score < 70) {
+      await checkLowScore(evaluation);
     }
     
-    res.status(201).json(result);
+    res.status(201).json({
+      success: true,
+      data: evaluation
+    });
   } catch (error) {
-    console.error('Değerlendirme oluşturma hatası:', error);
-    res.status(500).json({ error: 'Sunucu hatası' });
+    logger.error('Değerlendirme oluşturma hatası:', error);
+    next(error);
   }
 };
 
-// Bir çağrının değerlendirmesini alma
-export const getEvaluationByCallId = async (req: Request, res: Response) => {
+// Değerlendirmeyi çağrı ID'sine göre getir
+export const getEvaluationByCallId = async (req: Request, res: Response, next: Function) => {
   try {
     const { callId } = req.params;
     
-    if (!callId) {
-      return res.status(400).json({ error: 'Çağrı ID parametresi gereklidir' });
+    if (!mongoose.Types.ObjectId.isValid(callId)) {
+      return next(new ErrorResponse('Geçersiz çağrı ID formatı', 400));
     }
     
-    const evaluation = await EvaluationModel.findByCallId(parseInt(callId));
+    const evaluation = await Evaluation.findOne({ call: callId })
+      .populate('evaluator', 'full_name email')
+      .populate('call')
+      .populate('details.criteria_id');
     
     if (!evaluation) {
-      return res.status(404).json({ error: 'Değerlendirme bulunamadı' });
+      return next(new ErrorResponse('Değerlendirme bulunamadı', 404));
     }
     
-    // Değerlendirme detaylarını al
-    const details = await EvaluationModel.getEvaluationDetails(evaluation.id!);
-    
-    res.json({ ...evaluation, details });
+    res.status(200).json({
+      success: true,
+      data: evaluation
+    });
   } catch (error) {
-    console.error('Değerlendirme getirme hatası:', error);
-    res.status(500).json({ error: 'Sunucu hatası' });
+    logger.error('Değerlendirme getirme hatası:', error);
+    next(error);
   }
 };
 
-// Kullanıcının kendi değerlendirmelerini getirme (Müşteri temsilcisi için)
-export const getMyEvaluations = async (req: Request, res: Response) => {
+// Kullanıcının değerlendirmelerini getirme
+export const getMyEvaluations = async (req: Request, res: Response, next: Function) => {
   try {
     const userId = req.user?.id;
-    
-    if (!userId) {
-      return res.status(401).json({ error: 'Kullanıcı bilgisi bulunamadı' });
-    }
-    
-    // Kullanıcı rolüne göre değerlendirmeleri getir
     const userRole = req.user?.role;
     
+    if (!userId) {
+      return next(new ErrorResponse('Kullanıcı bilgisi bulunamadı', 401));
+    }
+    
+    let evaluations;
+    
     if (userRole === 'agent') {
-      // Müşteri temsilcisiyse, kendisine yapılan değerlendirmeleri getir
-      const evaluations = await EvaluationModel.getAgentEvaluations(parseInt(userId));
-      res.json(evaluations);
-    } else if (userRole === 'quality_expert') {
-      // Kalite uzmanıysa, kendi yaptığı değerlendirmeleri getir
-      const evaluations = await EvaluationModel.getEvaluationsByEvaluator(parseInt(userId));
-      res.json(evaluations);
+      // Müşteri temsilcisinin değerlendirmelerini getir
+      evaluations = await Evaluation.getAgentEvaluations(userId);
+    } else if (userRole === 'quality_expert' || userRole === 'manager') {
+      // Kalite uzmanının yaptığı değerlendirmeleri getir
+      evaluations = await Evaluation.getEvaluationsByEvaluator(userId);
     } else {
-      res.status(403).json({ error: 'Bu işlem için yetkiniz yok' });
+      return next(new ErrorResponse('Bu işlem için yetkiniz yok', 403));
     }
+    
+    res.status(200).json({
+      success: true,
+      count: evaluations.length,
+      data: evaluations
+    });
   } catch (error) {
-    console.error('Değerlendirme getirme hatası:', error);
-    res.status(500).json({ error: 'Sunucu hatası' });
+    logger.error('Değerlendirme getirme hatası:', error);
+    next(error);
   }
 };
 
-// Değerlendirmeleri kalite uzmanına göre getirme
-export const getEvaluationsByEvaluator = async (req: Request, res: Response) => {
+// Değerlendirmeleri değerlendiriciye göre getirme
+export const getEvaluationsByEvaluator = async (req: Request, res: Response, next: Function) => {
   try {
-    const evaluatorId = req.query.evaluatorId || req.user?.id;
+    const { evaluatorId } = req.params;
     
-    if (!evaluatorId) {
-      return res.status(400).json({ error: 'Değerlendirici ID parametresi gereklidir' });
+    if (!mongoose.Types.ObjectId.isValid(evaluatorId)) {
+      return next(new ErrorResponse('Geçersiz değerlendirici ID formatı', 400));
     }
     
-    const evaluations = await EvaluationModel.getEvaluationsByEvaluator(parseInt(evaluatorId.toString()));
-    res.json(evaluations);
+    // Değerlendirici var mı kontrol et
+    const evaluator = await User.findById(evaluatorId);
+    if (!evaluator) {
+      return next(new ErrorResponse('Belirtilen değerlendirici bulunamadı', 404));
+    }
+    
+    // Manager değilse, sadece kendi değerlendirmelerini görebilir
+    if (req.user?.role !== 'manager' && req.user?.id !== evaluatorId) {
+      return next(new ErrorResponse('Başka bir kullanıcının değerlendirmelerini görme yetkiniz yok', 403));
+    }
+    
+    const evaluations = await Evaluation.find({ evaluator: evaluatorId })
+      .populate('call')
+      .populate('evaluator', 'full_name email')
+      .sort({ evaluation_date: -1 });
+    
+    res.status(200).json({
+      success: true,
+      count: evaluations.length,
+      data: evaluations
+    });
   } catch (error) {
-    console.error('Değerlendirme getirme hatası:', error);
-    res.status(500).json({ error: 'Sunucu hatası' });
+    logger.error('Değerlendirme getirme hatası:', error);
+    next(error);
   }
 };
 
-// Değerlendirmeleri müşteri temsilcisine göre getirme
-export const getEvaluationsByAgent = async (req: Request, res: Response) => {
+// Değerlendirmeleri çağrı görevlisine göre getirme
+export const getEvaluationsByAgent = async (req: Request, res: Response, next: Function) => {
   try {
     const { agentId } = req.params;
     
-    if (!agentId) {
-      return res.status(400).json({ error: 'Temsilci ID parametresi gereklidir' });
+    if (!mongoose.Types.ObjectId.isValid(agentId)) {
+      return next(new ErrorResponse('Geçersiz çağrı görevlisi ID formatı', 400));
     }
     
-    // Kendi değerlendirmelerini görüntüleyen bir temsilciyse, yalnızca kendi ID'sini kullanmasına izin ver
+    // Çağrı görevlisi var mı kontrol et
+    const agent = await User.findById(agentId);
+    if (!agent) {
+      return next(new ErrorResponse('Belirtilen çağrı görevlisi bulunamadı', 404));
+    }
+    
+    // Agent rolündeki kullanıcı sadece kendi değerlendirmelerini görebilir
     if (req.user?.role === 'agent' && req.user.id !== agentId) {
-      return res.status(403).json({ error: 'Yalnızca kendi değerlendirmelerinizi görüntüleyebilirsiniz' });
+      return next(new ErrorResponse('Başka bir çağrı görevlisinin değerlendirmelerini görme yetkiniz yok', 403));
     }
     
-    const evaluations = await EvaluationModel.getAgentEvaluations(parseInt(agentId));
-    res.json(evaluations);
+    const evaluations = await Evaluation.getAgentEvaluations(agentId);
+    
+    res.status(200).json({
+      success: true,
+      count: evaluations.length,
+      data: evaluations
+    });
   } catch (error) {
-    console.error('Değerlendirme getirme hatası:', error);
-    res.status(500).json({ error: 'Sunucu hatası' });
-  }
-};
-
-// Tek bir değerlendirmenin detaylarını getirme
-export const getEvaluationDetail = async (req: Request, res: Response) => {
-  try {
-    const { id } = req.params;
-    
-    if (!id) {
-      return res.status(400).json({ error: 'Değerlendirme ID parametresi gereklidir' });
-    }
-    
-    // Değerlendirmeyi getir
-    const query = `
-      SELECT e.*, c.customer_phone, c.call_duration, 
-             a.full_name as agent_name, ev.full_name as evaluator_name
-      FROM evaluations e
-      JOIN calls c ON e.call_id = c.id
-      JOIN users a ON c.agent_id = a.id
-      JOIN users ev ON e.evaluator_id = ev.id
-      WHERE e.id = $1
-    `;
-    
-    const evaluationResult = await pool.query(query, [id]);
-    
-    if (evaluationResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Değerlendirme bulunamadı' });
-    }
-    
-    const evaluation = evaluationResult.rows[0];
-    
-    // Değerlendirme detaylarını getir
-    const details = await EvaluationModel.getEvaluationDetails(parseInt(id));
-    
-    res.json({ ...evaluation, details });
-  } catch (error) {
-    console.error('Değerlendirme detayı getirme hatası:', error);
-    res.status(500).json({ error: 'Sunucu hatası' });
+    logger.error('Değerlendirme getirme hatası:', error);
+    next(error);
   }
 };
 
 // Değerlendirme istatistiklerini getirme
-export const getEvaluationStats = async (req: Request, res: Response) => {
+export const getEvaluationStats = async (req: Request, res: Response, next: Function) => {
   try {
-    // Tarih aralığı filtreleri
-    const startDate = req.query.startDate as string || '';
-    const endDate = req.query.endDate as string || '';
-    const agentId = req.query.agentId as string || '';
-    const evaluatorId = req.query.evaluatorId as string || '';
-    const minScore = req.query.minScore as string || '';
-    const maxScore = req.query.maxScore as string || '';
+    const { startDate, endDate, agentId, evaluatorId, minScore, maxScore } = req.query;
     
-    let whereConditions = [];
-    const params: any[] = [];
-    let paramIndex = 1;
+    // Filtre objesi oluştur
+    const filter: any = {};
     
-    // Filtre koşullarını oluştur
-    if (startDate) {
-      whereConditions.push(`e.evaluation_date >= $${paramIndex}`);
-      params.push(startDate);
-      paramIndex++;
+    // Tarih filtresini ekle
+    if (startDate || endDate) {
+      filter.evaluation_date = {};
+      if (startDate) {
+        filter.evaluation_date.$gte = new Date(startDate as string);
+      }
+      if (endDate) {
+        filter.evaluation_date.$lte = new Date(endDate as string);
+      }
     }
     
-    if (endDate) {
-      whereConditions.push(`e.evaluation_date <= $${paramIndex}`);
-      params.push(endDate);
-      paramIndex++;
+    // Puan filtresini ekle
+    if (minScore || maxScore) {
+      filter.total_score = {};
+      if (minScore) {
+        filter.total_score.$gte = parseInt(minScore as string);
+      }
+      if (maxScore) {
+        filter.total_score.$lte = parseInt(maxScore as string);
+      }
     }
     
-    if (agentId) {
-      whereConditions.push(`c.agent_id = $${paramIndex}`);
-      params.push(agentId);
-      paramIndex++;
+    // Çağrı görevlisi filtresi için aggregate pipeline oluştur
+    const pipeline = [];
+    
+    // Ana sorgu
+    pipeline.push({ $match: filter });
+    
+    // Çağrı ile join
+    pipeline.push({
+      $lookup: {
+        from: 'calls',
+        localField: 'call',
+        foreignField: '_id',
+        as: 'callData'
+      }
+    });
+    
+    pipeline.push({ $unwind: '$callData' });
+    
+    // Çağrı görevlisi filtresi
+    if (agentId && mongoose.Types.ObjectId.isValid(agentId as string)) {
+      pipeline.push({
+        $match: {
+          'callData.agent': new mongoose.Types.ObjectId(agentId as string)
+        }
+      });
     }
     
-    if (evaluatorId) {
-      whereConditions.push(`e.evaluator_id = $${paramIndex}`);
-      params.push(evaluatorId);
-      paramIndex++;
+    // Değerlendirici filtresi
+    if (evaluatorId && mongoose.Types.ObjectId.isValid(evaluatorId as string)) {
+      pipeline.push({
+        $match: {
+          evaluator: new mongoose.Types.ObjectId(evaluatorId as string)
+        }
+      });
     }
     
-    if (minScore) {
-      whereConditions.push(`e.total_score >= $${paramIndex}`);
-      params.push(minScore);
-      paramIndex++;
-    }
+    // İstatistik hesaplama
+    pipeline.push({
+      $group: {
+        _id: null,
+        count: { $sum: 1 },
+        averageScore: { $avg: '$total_score' },
+        minScore: { $min: '$total_score' },
+        maxScore: { $max: '$total_score' },
+        evaluations: { $push: '$$ROOT' }
+      }
+    });
     
-    if (maxScore) {
-      whereConditions.push(`e.total_score <= $${paramIndex}`);
-      params.push(maxScore);
-      paramIndex++;
-    }
+    // İstatistikleri al
+    const stats = await Evaluation.aggregate(pipeline);
     
-    const whereClause = whereConditions.length 
-      ? `WHERE ${whereConditions.join(' AND ')}`
-      : '';
+    const result = stats.length > 0 ? {
+      count: stats[0].count,
+      averageScore: parseFloat(stats[0].averageScore.toFixed(2)),
+      minScore: stats[0].minScore,
+      maxScore: stats[0].maxScore,
+      evaluations: stats[0].evaluations.slice(0, 100) // Performans için ilk 100 değerlendirmeyi gönder
+    } : {
+      count: 0,
+      averageScore: 0,
+      minScore: 0,
+      maxScore: 0,
+      evaluations: []
+    };
     
-    // Genel istatistikler
-    const generalStatsQuery = `
-      SELECT 
-        COUNT(*) as total_evaluations,
-        AVG(total_score) as average_score,
-        MAX(total_score) as highest_score,
-        MIN(total_score) as lowest_score
-      FROM evaluations e
-      JOIN calls c ON e.call_id = c.id
-      ${whereClause}
-    `;
-    
-    const generalStatsResult = await pool.query(generalStatsQuery, params);
-    
-    // Temsilcilere göre ortalama puanlar
-    const agentStatsQuery = `
-      SELECT 
-        a.id as agent_id,
-        a.full_name as agent_name,
-        COUNT(e.id) as evaluation_count,
-        AVG(e.total_score) as average_score
-      FROM evaluations e
-      JOIN calls c ON e.call_id = c.id
-      JOIN users a ON c.agent_id = a.id
-      ${whereClause}
-      GROUP BY a.id, a.full_name
-      ORDER BY average_score DESC
-    `;
-    
-    const agentStatsResult = await pool.query(agentStatsQuery, params);
-    
-    // Kriterlere göre ortalama puanlar ve penalty istatistikleri
-    const criteriaStatsQuery = `
-      SELECT 
-        ec.id as criteria_id,
-        ec.name as criteria_name,
-        AVG(ed.score) as average_score,
-        (AVG(ed.score) / ec.max_score * 100) as percentage,
-        COUNT(*) FILTER (WHERE ed.penalty_type != 'none') as penalty_count,
-        (COUNT(*) FILTER (WHERE ed.penalty_type != 'none')::float / COUNT(*)) as penalty_ratio
-      FROM evaluation_details ed
-      JOIN evaluations e ON ed.evaluation_id = e.id
-      JOIN evaluation_criteria ec ON ed.criteria_id = ec.id
-      JOIN calls c ON e.call_id = c.id
-      ${whereClause}
-      GROUP BY ec.id, ec.name, ec.max_score
-      ORDER BY criteria_id
-    `;
-    const criteriaStatsResult = await pool.query(criteriaStatsQuery, params);
-
-    // Değerlendirme listesi (ilk 100)
-    const evaluationsQuery = `
-      SELECT 
-        e.id,
-        e.evaluation_date as date,
-        a.full_name as agent_name,
-        c.id as call_ref,
-        ev.full_name as evaluator_name,
-        e.total_score as score
-      FROM evaluations e
-      JOIN calls c ON e.call_id = c.id
-      JOIN users a ON c.agent_id = a.id
-      JOIN users ev ON e.evaluator_id = ev.id
-      ${whereClause}
-      ORDER BY e.evaluation_date DESC
-      LIMIT 100
-    `;
-    const evaluationsResult = await pool.query(evaluationsQuery, params);
-
-    // Genel penalty istatistikleri
-    const penaltyCount = criteriaStatsResult.rows.reduce((acc, c) => acc + Number(c.penalty_count), 0);
-    const penaltyRatio = criteriaStatsResult.rows.length > 0 ?
-      (criteriaStatsResult.rows.reduce((acc, c) => acc + Number(c.penalty_count), 0) /
-      criteriaStatsResult.rows.reduce((acc, c) => acc + Number(c.penalty_count) / (Number(c.penalty_ratio) || 1), 0)) : 0;
-
-    res.json({
-      general: {
-        ...generalStatsResult.rows[0],
-        penalty_count: penaltyCount,
-        penalty_ratio: penaltyRatio
-      },
-      agents: agentStatsResult.rows || [],
-      criteria: criteriaStatsResult.rows || [],
-      evaluations: evaluationsResult.rows || []
+    res.status(200).json({
+      success: true,
+      data: result
     });
   } catch (error) {
-    console.error('İstatistik getirme hatası:', error);
-    res.status(500).json({ error: 'Sunucu hatası' });
+    logger.error('Değerlendirme istatistikleri hatası:', error);
+    next(error);
   }
 };
 
-// Penalty istatistiklerini Excel olarak export eden endpoint
-export const exportEvaluationStats = async (req: Request, res: Response) => {
+// Değerlendirme istatistiklerini Excel olarak dışa aktarma
+export const exportEvaluationStats = async (req: Request, res: Response, next: Function) => {
   try {
-    // Aynı filtreleri kullan
-    const startDate = req.query.startDate as string || '';
-    const endDate = req.query.endDate as string || '';
-    let dateFilter = '';
-    const params: any[] = [];
-    if (startDate && endDate) {
-      dateFilter = 'WHERE e.evaluation_date BETWEEN $1 AND $2';
-      params.push(startDate, endDate);
-    } else if (startDate) {
-      dateFilter = 'WHERE e.evaluation_date >= $1';
-      params.push(startDate);
-    } else if (endDate) {
-      dateFilter = 'WHERE e.evaluation_date <= $1';
-      params.push(endDate);
+    const { startDate, endDate, agentId, evaluatorId, minScore, maxScore } = req.query;
+    
+    // Filtre objesi oluştur
+    const filter: any = {};
+    
+    // Tarih filtresini ekle
+    if (startDate || endDate) {
+      filter.evaluation_date = {};
+      if (startDate) {
+        filter.evaluation_date.$gte = new Date(startDate as string);
+      }
+      if (endDate) {
+        filter.evaluation_date.$lte = new Date(endDate as string);
+      }
     }
     
-    // Genel istatistikler
-    const generalStatsQuery = `
-      SELECT 
-        COUNT(*) as total_evaluations,
-        AVG(total_score) as average_score,
-        MAX(total_score) as highest_score,
-        MIN(total_score) as lowest_score
-      FROM evaluations e
-      JOIN calls c ON e.call_id = c.id
-      ${dateFilter}
-    `;
+    // Puan filtresini ekle
+    if (minScore || maxScore) {
+      filter.total_score = {};
+      if (minScore) {
+        filter.total_score.$gte = parseInt(minScore as string);
+      }
+      if (maxScore) {
+        filter.total_score.$lte = parseInt(maxScore as string);
+      }
+    }
     
-    const generalStatsResult = await pool.query(generalStatsQuery, params);
+    // Değerlendirmeleri getir
+    let query = Evaluation.find(filter)
+      .populate('evaluator', 'full_name email')
+      .populate({
+        path: 'call',
+        populate: {
+          path: 'agent',
+          select: 'full_name'
+        }
+      })
+      .sort('-evaluation_date');
     
-    // Temsilcilere göre ortalama puanlar
-    const agentStatsQuery = `
-      SELECT 
-        a.id as agent_id,
-        a.full_name as agent_name,
-        COUNT(e.id) as evaluation_count,
-        AVG(e.total_score) as average_score
-      FROM evaluations e
-      JOIN calls c ON e.call_id = c.id
-      JOIN users a ON c.agent_id = a.id
-      ${dateFilter}
-      GROUP BY a.id, a.full_name
-      ORDER BY average_score DESC
-    `;
+    // Değerlendirici filtresi
+    if (evaluatorId && mongoose.Types.ObjectId.isValid(evaluatorId as string)) {
+      query = query.find({ evaluator: evaluatorId });
+    }
     
-    const agentStatsResult = await pool.query(agentStatsQuery, params);
+    const evaluations = await query.exec();
     
-    // Kriterlere göre ortalama puanlar ve penalty istatistikleri
-    const criteriaStatsQuery = `
-      SELECT 
-        ec.id as criteria_id,
-        ec.name as criteria_name,
-        AVG(ed.score) as average_score,
-        (AVG(ed.score) / ec.max_score * 100) as percentage,
-        COUNT(*) FILTER (WHERE ed.penalty_type != 'none') as penalty_count,
-        (COUNT(*) FILTER (WHERE ed.penalty_type != 'none')::float / COUNT(*)) as penalty_ratio
-      FROM evaluation_details ed
-      JOIN evaluations e ON ed.evaluation_id = e.id
-      JOIN evaluation_criteria ec ON ed.criteria_id = ec.id
-      JOIN calls c ON e.call_id = c.id
-      ${dateFilter}
-      GROUP BY ec.id, ec.name, ec.max_score
-      ORDER BY criteria_id
-    `;
-    const criteriaStatsResult = await pool.query(criteriaStatsQuery, params);
-
-    // Değerlendirme listesi (ilk 100)
-    const evaluationsQuery = `
-      SELECT 
-        e.id,
-        e.evaluation_date as date,
-        a.full_name as agent_name,
-        c.id as call_ref,
-        ev.full_name as evaluator_name,
-        e.total_score as score
-      FROM evaluations e
-      JOIN calls c ON e.call_id = c.id
-      JOIN users a ON c.agent_id = a.id
-      JOIN users ev ON e.evaluator_id = ev.id
-      ${dateFilter}
-      ORDER BY e.evaluation_date DESC
-      LIMIT 100
-    `;
-    const evaluationsResult = await pool.query(evaluationsQuery, params);
-
-    // Genel penalty istatistikleri
-    const penaltyCount = criteriaStatsResult.rows.reduce((acc, c) => acc + Number(c.penalty_count), 0);
-    const penaltyRatio = criteriaStatsResult.rows.length > 0 ?
-      (criteriaStatsResult.rows.reduce((acc, c) => acc + Number(c.penalty_count), 0) /
-      criteriaStatsResult.rows.reduce((acc, c) => acc + Number(c.penalty_count) / (Number(c.penalty_ratio) || 1), 0)) : 0;
-
-    res.json({
-      general: {
-        ...generalStatsResult.rows[0],
-        penalty_count: penaltyCount,
-        penalty_ratio: penaltyRatio
-      },
-      agents: agentStatsResult.rows || [],
-      criteria: criteriaStatsResult.rows || [],
-      evaluations: evaluationsResult.rows || []
+    // Excel dosyasını oluştur
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Değerlendirmeler');
+    
+    // Sütun başlıklarını tanımla
+    worksheet.columns = [
+      { header: 'Değerlendirme Tarihi', key: 'date', width: 20 },
+      { header: 'Çağrı Görevlisi', key: 'agent', width: 25 },
+      { header: 'Değerlendirici', key: 'evaluator', width: 25 },
+      { header: 'Toplam Puan', key: 'score', width: 15 },
+      { header: 'Notlar', key: 'notes', width: 40 }
+    ];
+    
+    // Verileri ekle
+    evaluations.forEach(eval => {
+      worksheet.addRow({
+        date: eval.evaluation_date.toLocaleDateString('tr-TR'),
+        agent: eval.call?.agent?.full_name || 'Bilinmiyor',
+        evaluator: eval.evaluator?.full_name || 'Bilinmiyor',
+        score: eval.total_score,
+        notes: eval.notes || ''
+      });
     });
+    
+    // Başlık satırını formatla
+    worksheet.getRow(1).font = { bold: true };
+    
+    // Excel dosyasını oluştur
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename=degerlendirmeler.xlsx');
+    
+    await workbook.xlsx.write(res);
+    res.end();
   } catch (error) {
-    console.error('İstatistik getirme hatası:', error);
-    res.status(500).json({ error: 'Sunucu hatası' });
+    logger.error('Excel dışa aktarma hatası:', error);
+    next(error);
   }
 };
 
-// Trend verilerini getirme
-export const getTrendData = async (req: Request, res: Response) => {
+// Düşük puanlı değerlendirmeler için bildirim kontrol fonksiyonu
+const checkLowScore = async (evaluation: any) => {
   try {
-    const timeRange = req.query.timeRange as string || 'month';
-    
-    let intervalUnit = 'day';
-    let intervalCount = 30; // Varsayılan aylık
-    
-    // Zaman aralığına göre uygun parametreleri belirle
-    switch (timeRange) {
-      case 'week':
-        intervalUnit = 'day';
-        intervalCount = 7;
-        break;
-      case 'month':
-        intervalUnit = 'day';
-        intervalCount = 30;
-        break;
-      case 'quarter':
-        intervalUnit = 'week';
-        intervalCount = 12;
-        break;
-      case 'year':
-        intervalUnit = 'month';
-        intervalCount = 12;
-        break;
-      default:
-        intervalUnit = 'day';
-        intervalCount = 30;
+    if (evaluation.total_score < 70) {
+      // Bildirim mantığı burada uygulanır
+      logger.info(`Düşük puanlı değerlendirme bildirimi - Puan: ${evaluation.total_score}, Değerlendirme ID: ${evaluation._id}`);
     }
-    
-    // Zaman dilimlerine göre verileri getir (PostgreSQL'in date_trunc fonksiyonu ile)
-    const query = `
-      WITH date_series AS (
-        SELECT 
-          date_trunc($1, evaluation_date) as time_bucket
-        FROM 
-          evaluations
-        WHERE 
-          evaluation_date >= NOW() - ($2 || ' ' || $1)::INTERVAL
-        GROUP BY 
-          date_trunc($1, evaluation_date)
-        ORDER BY 
-          time_bucket
-      )
-      SELECT 
-        to_char(ds.time_bucket, 'YYYY-MM-DD') as date,
-        COALESCE(AVG(e.total_score), 0) as average_score,
-        COALESCE(
-          COUNT(*) FILTER (WHERE ed.penalty_type != 'none')::float / NULLIF(COUNT(*), 0), 
-          0
-        ) as penalty_ratio
-      FROM 
-        date_series ds
-      LEFT JOIN 
-        evaluations e ON date_trunc($1, e.evaluation_date) = ds.time_bucket
-      LEFT JOIN 
-        evaluation_details ed ON ed.evaluation_id = e.id
-      GROUP BY 
-        ds.time_bucket
-      ORDER BY 
-        ds.time_bucket
-    `;
-    
-    const result = await pool.query(query, [intervalUnit, intervalCount.toString()]);
-    
-    // Verileri uygun formata dönüştürüp gönder
-    const trendData = result.rows.map(row => ({
-      date: row.date,
-      averageScore: parseFloat(row.average_score || 0),
-      penaltyRatio: parseFloat(row.penalty_ratio || 0)
-    }));
-    
-    res.json(trendData);
   } catch (error) {
-    console.error('Trend verisi getirme hatası:', error);
-    res.status(500).json({ error: 'Sunucu hatası' });
-  }
-};
-
-// AI ile otomatik değerlendirme oluşturma
-export const createAutoEvaluation = async (req: Request, res: Response) => {
-  try {
-    const { callId } = req.params;
-    
-    if (!callId) {
-      return res.status(400).json({ error: 'Çağrı ID parametresi gereklidir' });
-    }
-    
-    // Değerlendirmeyi yapan kullanıcının ID'sini alıyoruz
-    const evaluatorId = req.user?.id;
-    
-    if (!evaluatorId) {
-      return res.status(401).json({ error: 'Kullanıcı bilgisi bulunamadı' });
-    }
-    
-    // Çağrı detaylarını getir
-    const callQuery = 'SELECT * FROM calls WHERE id = $1';
-    const callResult = await pool.query(callQuery, [callId]);
-    
-    if (callResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Çağrı bulunamadı' });
-    }
-    
-    const call = callResult.rows[0];
-    
-    if (!call.recording_path) {
-      return res.status(400).json({ error: 'Bu çağrı için kayıt bulunamadı' });
-    }
-    
-    // Zaten değerlendirilmiş mi kontrol et
-    const existingEvaluation = await EvaluationModel.findByCallId(parseInt(callId));
-    if (existingEvaluation) {
-      return res.status(400).json({ error: 'Bu çağrı zaten değerlendirilmiş' });
-    }
-    
-    // AI servisi ile değerlendirme yap
-    const evaluation = await AIService.processCallWithAI(
-      parseInt(callId),
-      call.recording_path,
-      parseInt(evaluatorId)
-    );
-    
-    // Düşük puan bildirimi kontrolü
-    if (evaluation.id) {
-      await NotificationService.checkLowScore(evaluation.id);
-    }
-    
-    res.status(201).json({
-      message: 'Otomatik değerlendirme başarıyla oluşturuldu',
-      evaluation
-    });
-  } catch (error) {
-    console.error('Otomatik değerlendirme hatası:', error);
-    res.status(500).json({ error: 'Sunucu hatası' });
+    logger.error('Düşük puan bildirimi hatası:', error);
   }
 }; 

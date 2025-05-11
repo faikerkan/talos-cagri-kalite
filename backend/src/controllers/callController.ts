@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import { Call } from '../models/Call';
 import mongoose from 'mongoose';
-import { pool } from '../config/database';
+import logger from '../utils/logger';
 
 // Multer ile dosya yükleme için Request tipini genişlet
 interface MulterRequest extends Request {
@@ -32,33 +32,28 @@ export const getCalls = async (req: Request, res: Response) => {
   try {
     const { status } = req.query;
     const user = req.user;
-    let query = 'SELECT c.id, c.customer_phone, c.call_duration, c.call_date, c.status, u.id as agent_id, u.full_name as agent_full_name, u.username as agent_username FROM calls c JOIN users u ON c.agent_id = u.id';
-    const params: any[] = [];
-    const where: string[] = [];
+    
+    // MongoDB sorgusu için filtre oluştur
+    const filter: any = {};
+    
+    // Status filtresi
     if (status) {
-      where.push('c.status = $' + (params.length + 1));
-      params.push(status);
+      filter.status = status;
     }
+    
+    // Kullanıcı agent ise, sadece kendi çağrılarını görsün
     if (user && user.role === 'agent') {
-      where.push('c.agent_id = $' + (params.length + 1));
-      params.push(user.id);
+      filter.agent = user.id;
     }
-    if (where.length > 0) {
-      query += ' WHERE ' + where.join(' AND ');
-    }
-    query += ' ORDER BY c.call_date DESC';
-    const result = await pool.query(query, params);
-    // Frontend ile uyumlu veri formatı
-    const calls = result.rows.map(row => ({
-      id: row.id,
-      agent: { full_name: row.agent_full_name, username: row.agent_username },
-      customer_number: row.customer_phone,
-      duration: row.call_duration,
-      date: row.call_date,
-      status: row.status
-    }));
+    
+    // Çağrıları getir
+    const calls = await Call.find(filter)
+      .populate('agent', 'full_name username')
+      .sort({ date: -1 });
+    
     res.json(calls);
   } catch (error) {
+    logger.error('Çağrılar alınırken bir hata oluştu:', error);
     res.status(500).json({ error: 'Çağrılar alınırken bir hata oluştu.' });
   }
 };

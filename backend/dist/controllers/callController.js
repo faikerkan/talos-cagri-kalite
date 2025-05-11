@@ -15,6 +15,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.uploadRecording = exports.deleteCall = exports.getPendingCalls = exports.updateCallStatus = exports.getCallById = exports.getCalls = exports.createCall = void 0;
 const Call_1 = require("../models/Call");
 const mongoose_1 = __importDefault(require("mongoose"));
+const logger_1 = __importDefault(require("../utils/logger"));
 const createCall = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { customer_number, duration, date, status } = req.body;
@@ -38,19 +39,24 @@ const getCalls = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { status } = req.query;
         const user = req.user;
-        let query = {};
+        // MongoDB sorgusu için filtre oluştur
+        const filter = {};
+        // Status filtresi
         if (status) {
-            query = { status };
+            filter.status = status;
         }
-        if (user.role === 'agent') {
-            query = Object.assign(Object.assign({}, query), { agent: user.id });
+        // Kullanıcı agent ise, sadece kendi çağrılarını görsün
+        if (user && user.role === 'agent') {
+            filter.agent = user.id;
         }
-        const calls = yield Call_1.Call.find(query)
+        // Çağrıları getir
+        const calls = yield Call_1.Call.find(filter)
             .populate('agent', 'full_name username')
             .sort({ date: -1 });
         res.json(calls);
     }
     catch (error) {
+        logger_1.default.error('Çağrılar alınırken bir hata oluştu:', error);
         res.status(500).json({ error: 'Çağrılar alınırken bir hata oluştu.' });
     }
 });
