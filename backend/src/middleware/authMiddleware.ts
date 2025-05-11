@@ -20,11 +20,11 @@ export const authenticateToken = (req: Request, res: Response, next: NextFunctio
   }
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'default_secret') as TokenPayload;
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'default_secret') as any;
     
     // req objesine user bilgilerini ekle
     req.user = {
-      id: decoded.userId,
+      id: decoded.userId || decoded.id,
       username: decoded.username,
       role: decoded.role
     };

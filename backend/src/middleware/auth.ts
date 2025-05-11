@@ -3,8 +3,8 @@ import jwt from 'jsonwebtoken';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-key';
 
-export const generateToken = (userId: string) => {
-  return jwt.sign({ id: userId }, JWT_SECRET, { expiresIn: '24h' });
+export const generateToken = (userId: string, username: string, role: string) => {
+  return jwt.sign({ id: userId, userId, username, role }, JWT_SECRET, { expiresIn: '24h' });
 };
 
 export const auth = (req: Request, res: Response, next: NextFunction) => {
